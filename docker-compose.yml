@@ -1,8 +1,20 @@
-version: '3.8'
-
 services:
+  waha:
+    image: devlikeapro/waha:latest  # Use a specific tag if preferred, e.g., :2024.10
+    container_name: waha
+    ports:
+      - "3000:3000"  # Expose WAHA's API if you need external access (e.g., for manual testing)
+    volumes:
+      - ./waha_data:/app/data  # Persistent storage for WAHA sessions and data
+    environment:
+      - WAHA_ENGINE=NOWEB  # Or VENOM/others; configure based on your needs (see WAHA docs)
+      - WAHA_WEBHOOK_SECRET=${WEBHOOK_SECRET}  # Pull from .env to match your app's secret
+      # Add other WAHA env vars as needed, e.g., for webhook URL
+    restart: unless-stopped
+
   app:
     build: .
+    container_name: app
     ports:
       - "5050:5050"
     volumes:
@@ -12,7 +24,6 @@ services:
     env_file:
       - .env
     depends_on:
-      - waha  # If you have a WAHA service
+      - waha
+    command: gunicorn -w 4 -b 0.0.0.0:5050 main:app  # Or with Uvicorn as discussed previously
     restart: unless-stopped
-
-  # Other services like waha...
