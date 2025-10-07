@@ -3,22 +3,27 @@ version: "3.9"
 services:
   app:
     build: .
+    container_name: whatsappagent_app
     ports:
       - "5050:5000"
     volumes:
       - ./app/images:/app/images
       - ./app/uploads:/app/uploads
       - ./app/receipts.db:/app/receipts.db
+      - ./app/logs:/app/logs
     env_file:
       - .env
     depends_on:
       - waha
+    restart: unless-stopped
 
   waha:
     image: devlikeapro/waha:chrome-2025.9.8
+    container_name: waha
     ports:
       - "8080:3000"
     environment:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
     volumes:
       - ./waha_data:/app/data
+    restart: unless-stopped

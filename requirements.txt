@@ -1,8 +1,8 @@
-Flask
-python-dotenv
-requests
-fuzzywuzzy
-python-Levenshtein
-cryptography
-pyrogram
-tgcrypto
+Flask==2.3.2
+python-dotenv==1.0.0
+requests==2.31.0
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.21.1
+cryptography==41.0.3
+pyrogram==2.0.39
+tgcrypto==1.2.0
