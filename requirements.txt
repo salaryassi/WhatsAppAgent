@@ -10,3 +10,4 @@ gunicorn==22.0.0
 uvicorn==0.30.6
 fastapi
 uvicorn
+pyrogram
