@@ -19,7 +19,7 @@ def index():
 @app.route('/whatsapp_webhook', methods=['POST'])
 def webhook():
     logging.info("--- Webhook Connection Attempt Received ---")
-
+    
     # Verify the secret to ensure it's from the Evolution API
     received_secret = request.headers.get('X-Webhook-Secret')
     if received_secret != WEBHOOK_SECRET:
@@ -29,6 +29,9 @@ def webhook():
     logging.info("+++ Webhook Secret Verified Successfully! +++")
     data = request.json
     logging.info(f"Received Data: {data}")
+    if "chatId" in data:
+        print("Found chatId:", data["chatId"])
+    return jsonify({"status": "ok"}), 200
 
     return jsonify({"status": "ok"}), 200
 

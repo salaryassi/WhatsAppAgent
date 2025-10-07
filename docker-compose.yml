@@ -1,4 +1,4 @@
-# docker-compose.yml
+version: "3.9"
 
 services:
   app:
@@ -12,13 +12,13 @@ services:
     env_file:
       - .env
     depends_on:
-      - evolution-api
+      - waha
 
-  evolution-api:
-    image: devlikeapro/whatsapp-http-api:latest
+  waha:
+    image: devlikeapro/waha:chrome-2025.9.8
     ports:
-      - "8080:3000" # <-- This maps host 8080 to container 3000
+      - "8080:3000"
     environment:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
     volumes:
-      - ./evolution_data:/app/data
+      - ./waha_data:/app/data
