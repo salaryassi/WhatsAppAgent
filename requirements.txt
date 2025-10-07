@@ -6,3 +6,5 @@ python-Levenshtein==0.21.1
 cryptography==41.0.3
 pyrogram==2.0.39
 tgcrypto==1.2.0
+gunicorn==22.0.0
+uvicorn==0.30.6

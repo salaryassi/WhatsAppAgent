@@ -1,23 +1,12 @@
-FROM python:3.9-slim
-
-# OS deps for cryptography and pyrogram native deps if needed
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# copy package directory
-COPY ./app ./app
+COPY . .
 
-ENV PYTHONUNBUFFERED=1
+EXPOSE 5050
 
-# default port used by the Flask app
-EXPOSE 5000
-
-CMD ["python", "-m", "app.main"]
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:5050", "main:app"]
