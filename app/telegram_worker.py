@@ -12,7 +12,7 @@ import time
 import logging
 import json
 from pyrogram import Client
-from .config import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN, FORWARD_TO_BOT_USERNAME, ADMIN_CHAT_ID
+from .config import TELEGRAM_API_ID, TELEGRAM_API_HASH, FORWARD_TO_BOT_USERNAME, ADMIN_CHAT_ID
 
 logger = logging.getLogger("app.telegram_worker")
 
