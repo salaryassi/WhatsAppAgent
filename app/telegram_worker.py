@@ -1,16 +1,7 @@
-"""
-telegram_worker.py
-
-This file runs a persistent Pyrogram Client in a background thread and exposes simple
-synchronous functions to enqueue sending documents/messages to Telegram. This avoids
-starting/stopping the client per message (which is expensive).
-"""
-
 import threading
 import queue
 import time
 import logging
-import json
 from pyrogram import Client
 from .config import TELEGRAM_API_ID, TELEGRAM_API_HASH, FORWARD_TO_BOT_USERNAME, ADMIN_CHAT_ID
 
@@ -20,7 +11,8 @@ class TelegramWorker:
     def __init__(self, session_name="whatsapp_agent_session"):
         self.session_name = session_name
         self._q = queue.Queue()
-        self._client = Client(self.session_name, api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH, bot_token=TELEGRAM_BOT_TOKEN)
+        # Remove bot_token, just use user session
+        self._client = Client(self.session_name, api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._running = False
 
