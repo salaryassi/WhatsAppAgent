@@ -1,0 +1,24 @@
+# docker-compose.yml
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./app/images:/app/images
+      - ./app/uploads:/app/uploads
+      - ./app/receipts.db:/app/receipts.db
+    env_file:
+      - .env
+    depends_on:
+      - evolution-api
+
+  evolution-api:
+    image: devlikeapro/whatsapp-http-api:latest
+    ports:
+      - "8080:3000" # <-- This maps host 8080 to container 3000
+    environment:
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+    volumes:
+      - ./evolution_data:/app/data

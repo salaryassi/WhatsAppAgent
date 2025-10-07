@@ -1,0 +1,8 @@
+# .gitignore
+.env
+*.pyc
+__pycache__/
+venv/
+*.session
+images/
+receipts.db
