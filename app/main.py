@@ -10,7 +10,6 @@ Responsibilities:
 """
 
 import os
-from fastapi import FastAPI
 import logging
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
