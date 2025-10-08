@@ -21,6 +21,7 @@ import requests
 import asyncio
 import re
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, request, jsonify
 from fuzzywuzzy import fuzz
@@ -49,28 +50,47 @@ CACHE_EXPIRATION_SECONDS = 120
 WAHA_MEDIA_HOST_OVERRIDE = os.environ.get("WAHA_MEDIA_HOST_OVERRIDE", "").strip()
 
 def _rewrite_media_url_for_container(url: str) -> str:
-    """Rewrite WAHA 'localhost' URLs to something reachable by this container.
-
-    Priority:
-      1) WAHA_MEDIA_HOST_OVERRIDE env var (e.g. 'waha:3000' or '46.20.111.31:8080')
-      2) replace localhost with host.docker.internal (if available)
-      3) return original url
     """
-    if not url or ("localhost" not in url and "127.0.0.1" not in url):
+    Safely rewrite WAHA 'localhost' URLs to something reachable by this container.
+
+    - If WAHA_MEDIA_HOST_OVERRIDE is set it may be:
+        * "waha:3000"     -> internal compose host:port
+        * "46.20.111.31:8080" -> external host:port
+        * "waha" or "46.20.111.31" -> host only (we will preserve original port if present)
+    - If no override, fall back to 'host.docker.internal' replacement where possible.
+    """
+    if not url:
         return url
 
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    port = parsed.port
+
+    if hostname not in ("localhost", "127.0.0.1"):
+        return url  # nothing to rewrite
+
+    # decide new netloc
     if WAHA_MEDIA_HOST_OVERRIDE:
-        # replace host (keep scheme and path)
-        return re.sub(r"(127\.0\.0\.1|localhost)", WAHA_MEDIA_HOST_OVERRIDE, url)
+        # if override includes a colon, assume "host:port"
+        if ":" in WAHA_MEDIA_HOST_OVERRIDE:
+            new_host, new_port = WAHA_MEDIA_HOST_OVERRIDE.split(":", 1)
+            new_netloc = f"{new_host}:{new_port}"
+        else:
+            # override only host — preserve original port if present
+            if port:
+                new_netloc = f"{WAHA_MEDIA_HOST_OVERRIDE}:{port}"
+            else:
+                new_netloc = WAHA_MEDIA_HOST_OVERRIDE
+    else:
+        # fallback: try docker host gateway name (works on many hosts with extra_hosts)
+        if port:
+            new_netloc = f"host.docker.internal:{port}"
+        else:
+            new_netloc = "host.docker.internal"
 
-    # best-effort fallback
-    return url.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
-
-# ----------------------
-# Flask app + logger
-# ----------------------
-app = Flask(__name__)
-
+    new_parsed = parsed._replace(netloc=new_netloc)
+    rewritten = urlunparse(new_parsed)
+    return rewritten
 
 def log_print(message, level="INFO"):
     """Print-based logger with timestamp and emoji level markers.
