@@ -78,24 +78,28 @@ def extract_messages_from_payload(payload):
     """
     Find and return a list of normalized message dicts from WAHA / webjs payloads.
     Handles:
-      - { "event": "message", ... }
+      - top-level {"event": "message", "payload": { ...message... }}
       - { "event": { "event":"message_create", "data":[ ... ] } }
       - { "event": { "event":"unread_count", "data":[ { "lastMessage": {...} }, ... ] } }
-      - { "messages": [ ... ] } (common other shape)
-    Each returned message is a dict with keys: body, from, author, deprecatedMms3Url, fileUrl, hasMedia, _raw
+      - {"messages": [...]}
     """
     try:
         # defensive: if payload is a JSON string
         if isinstance(payload, str):
             payload = json.loads(payload)
     except Exception:
-        # leave as-is
         pass
 
-    # If the top-level is a message object (common fallback)
-    if payload.get("event") == "message" or payload.get("type") == "message":
-        log_print("Detected top-level 'message' event.", level="DEBUG")
-        return [ _normalize_last_message_obj(payload) ]
+    # --- NEW: WAHA often wraps the actual message under "payload" ---
+    if payload.get("event") == "message":
+        # if there's a message wrapper under "payload", use it
+        inner = payload.get("payload")
+        if isinstance(inner, dict):
+            log_print("Top-level event=='message' with inner 'payload' — normalizing inner payload.", level="DEBUG")
+            return [_normalize_last_message_obj(inner)]
+        # otherwise fall back to the top-level object itself
+        log_print("Detected top-level 'message' event (no inner 'payload').", level="DEBUG")
+        return [_normalize_last_message_obj(payload)]
 
     # If messages list provided
     if isinstance(payload.get("messages"), list):
@@ -103,7 +107,6 @@ def extract_messages_from_payload(payload):
         return [ _normalize_last_message_obj(m) for m in payload.get("messages") if isinstance(m, dict) ]
 
     evt = payload.get("event")
-    # Nested event object (the WAHA log shows this)
     if isinstance(evt, dict):
         inner_type = evt.get("event")
         log_print(f"Detected nested event type: '{inner_type}'", level="DEBUG")
@@ -112,9 +115,7 @@ def extract_messages_from_payload(payload):
             data = evt.get("data", [])
             msgs = []
             for d in data:
-                # these items are usually already message dicts
                 normalized = _normalize_last_message_obj(d)
-                # If not normalized (empty), try more aggressive fallback:
                 if not normalized["body"] and isinstance(d, dict):
                     normalized = _normalize_last_message_obj(d.get("message") or d.get("lastMessage") or d)
                 msgs.append(normalized)
@@ -124,13 +125,32 @@ def extract_messages_from_payload(payload):
             data = evt.get("data", [])
             msgs = []
             for item in data:
-                # WAHA sends item["lastMessage"] with inner "_data"
                 lm = item.get("lastMessage") or item.get("last_message") or item.get("message")
                 if not lm:
                     continue
                 normalized = _normalize_last_message_obj(lm)
                 msgs.append(normalized)
             return msgs
+
+    # fallback: search for lastMessage anywhere
+    found = []
+    def _walk_for_last_message(obj):
+        if isinstance(obj, dict):
+            if "lastMessage" in obj:
+                found.append(obj["lastMessage"])
+            for v in obj.values():
+                _walk_for_last_message(v)
+        elif isinstance(obj, list):
+            for el in obj:
+                _walk_for_last_message(el)
+
+    _walk_for_last_message(payload)
+    if found:
+        log_print(f"Found {len(found)} 'lastMessage' objects via fallback walk.", level="DEBUG")
+        return [ _normalize_last_message_obj(lm) for lm in found ]
+
+    log_print("No messages found in payload by extractor.", level="DEBUG")
+    return []
 
     # As a last resort, try to find any 'lastMessage' fields anywhere in the JSON
     found = []
