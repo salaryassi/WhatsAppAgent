@@ -133,7 +133,9 @@ logging.basicConfig(
 )
 
 @app.route('/whatsapp_webhook', methods=['POST'], endpoint='whatsapp_webhook')
+
 def webhook():
+    print("--- WEBHOOK ENDPOINT WAS HIT ---", flush=True)
     logging.info("📩 Incoming webhook request received")
     data = request.get_json(force=True)
 
