@@ -1,0 +1,12 @@
+{
+    "messages": [
+        {
+            "chatId": "120363403036388430@g.us",
+            "author": "447700900456@c.us",
+            "mimetype": "image/jpeg",
+            "message": {
+                 "fileUrl": "http://your_waha_container_url/api/files/another_image.jpg"
+            }
+        }
+    ]
+}

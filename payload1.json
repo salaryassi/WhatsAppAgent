@@ -1,0 +1,13 @@
+{
+    "messages": [
+        {
+            "chatId": "120363403036388430@g.us",
+            "author": "447700900123@c.us",
+            "caption": "recc Maria Garcia",
+            "mimetype": "image/jpeg",
+            "message": {
+                "fileUrl": "http://your_waha_container_url/api/files/some_image.jpg"
+            }
+        }
+    ]
+}
