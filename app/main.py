@@ -48,35 +48,36 @@ with app.app_context():
 
 # --- CORE LOGIC: Smartly Extract Data from Webhooks ---
 
+# In app/main.py, replace the existing function with this one.
+
 def extract_messages_from_payload(payload):
     """
     Intelligently finds and returns a list of message objects from various webhook event types.
     This is the key function to handle WAHA's complex JSON structure.
     """
-    event_type = payload.get('event')
+    # The actual event data is nested inside the 'event' key.
+    event_data = payload.get('event', {})
     
-    # Sometimes the event type is nested
-    if isinstance(event_type, dict):
-        event_type = event_type.get('event')
+    # Get the type of the event (e.g., 'message_create').
+    event_type = event_data.get('event')
 
-    log_print(f"Received event of type: '{event_type}'")
+    log_print(f"Received event of type: '{event_type}'", level="DEBUG")
 
     if event_type == 'message_create':
-        # For new messages, the message objects are directly in the 'data' list
-        return payload.get('data', [])
+        # For new messages, the message objects are in the 'data' list INSIDE the 'event_data' object.
+        return event_data.get('data', [])
         
     elif event_type == 'unread_count':
-        # For unread counts, the message is nested inside 'lastMessage'
+        # For unread counts, the logic is more nested.
         messages = []
-        unread_chats = payload.get('event', {}).get('data', [])
+        # The path is event -> data -> lastMessage
+        unread_chats = event_data.get('data', [])
         for chat in unread_chats:
             if 'lastMessage' in chat:
                 messages.append(chat['lastMessage'])
         return messages
         
-    # Add other event types here if needed in the future
-    
-    # For all other events (like 'session.status', etc.), return an empty list
+    # For all other events, return an empty list.
     return []
 
 def extract_text_from_payload(msg_obj):
