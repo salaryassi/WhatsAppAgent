@@ -19,7 +19,7 @@ services:
     ports:
       - "8080:3000"
     environment:
-      - WAHA_SERVER_URL=http://waha:3000
+      - WAHA_MEDIA_HOST_OVERRIDE=46.20.111.31:3000
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
     volumes:
       - ./waha_data:/app/data
