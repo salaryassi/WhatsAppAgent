@@ -10,7 +10,7 @@ services:
       - WAHA_ENGINE=NOWEB  # Or VENOM/others; configure based on your needs (see WAHA docs)
       - WAHA_WEBHOOK_SECRET=${WEBHOOK_SECRET}  # Pull from .env to match your app's secret
       # Add other WAHA env vars as needed, e.g., for webhook URL
-    restart: unless-stopped
+    restart: unless-stopped 
 
   app:
     build: .
