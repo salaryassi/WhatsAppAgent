@@ -18,4 +18,4 @@ EXPOSE 5050
 ENV PYROGRAM_SESSION_DIR=/app/sessions
 
 # Start the app with Gunicorn + Uvicorn
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:5050"]
+CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:5050"]
