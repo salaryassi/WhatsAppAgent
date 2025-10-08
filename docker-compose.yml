@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   app:
     build: .
@@ -11,6 +9,8 @@ services:
       - ./receipts.db:/app/receipts.db
     env_file:
       - .env
+    environment:
+      - WAHA_MEDIA_HOST_OVERRIDE=waha:3000          # <--- add this so the app can rewrite URLs to the internal service
     depends_on:
       - waha
 
@@ -19,7 +19,6 @@ services:
     ports:
       - "8080:3000"
     environment:
-      - WAHA_MEDIA_HOST_OVERRIDE=46.20.111.31:3000
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
     volumes:
       - ./waha_data:/app/data
