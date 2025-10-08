@@ -6,49 +6,38 @@ import json
 import uuid
 import requests
 import asyncio
-import threading
+import re
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify
 from fuzzywuzzy import fuzz
 
-# Assuming these modules exist and are correctly implemented
-from .database import (get_db_connection, setup_database, store_receipt,
-                     get_receipt_by_id, mark_receipt_forwarded, log_event)
+from .config import EVOLUTION_API_KEY, IMAGES_DIR, MATCH_THRESHOLD
+from .database import (
+    get_db_connection,
+    setup_database,
+    store_receipt,
+    get_receipt_by_id,
+    mark_receipt_forwarded,
+    log_event
+)
 from .encryption import encrypt_image, decrypt_image
 from .telegram_bot import forward_to_bot
 from .utils import find_match_in_db
 
-# --- SCRIPT CONFIGURATION (No external config file needed) ---
-# Secrets should still come from the environment for security
-EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
-
-# Application settings
-RECEIPT_KEYWORD = "recc "      # The keyword to identify a receipt, whitespace is important!
-MATCH_THRESHOLD = 85           # The confidence score needed for a fuzzy match (e.g., 85%)
-IMAGES_DIR = "app/images"      # Directory to store encrypted images
-CACHE_EXPIRATION_SECONDS = 120 # How long to keep an image in cache without a "recc" message
-
 # --- In-Memory Cache for Recent Images ---
-# Links a (chat_id, sender_id) to a recently sent image URL
 recent_image_cache = {}
+CACHE_EXPIRATION_SECONDS = 120
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 
-# --- Custom Print Function for Reliable & Verbose Logging ---
+# --- Custom Print Function for Reliable Logging ---
 def log_print(message, level="INFO"):
     """A reliable print-based logger that shows timestamps and flushes immediately."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Using emojis for clear visual cues in the log
-    if level == "ERROR":
-        prefix = "❌ ERROR"
-    elif level == "WARNING":
-        prefix = "⚠️ WARNING"
-    else:
-        prefix = "✅ INFO"
-    
-    # The flush=True is critical for seeing logs immediately in Docker
+    level_map = {"ERROR": "❌ ERROR", "WARNING": "⚠️ WARNING", "INFO": "✅ INFO", "DEBUG": "🐞 DEBUG"}
+    prefix = level_map.get(level, "✅ INFO")
     print(f"[{timestamp}] [{prefix}] {message}", flush=True)
 
 # --- Initial Setup ---
@@ -57,188 +46,294 @@ with app.app_context():
     os.makedirs(IMAGES_DIR, exist_ok=True)
     log_print("Database and image directory initialized.")
 
-# ==============================================================================
-#  HELPER & BACKGROUND TASK FUNCTIONS
-# ==============================================================================
 
-def extract_message_details(msg: dict) -> dict:
-    """Extracts key details from a message payload into a structured dictionary."""
-    log_print(f"Extracting details from raw message payload...")
-    message = msg.get("message", {}) if isinstance(msg.get("message"), dict) else {}
-    
-    def get_first_valid(*keys):
-        for key in keys:
-            if msg.get(key): return msg[key]
-            if message.get(key): return message[key]
-        return None
+# --- CORE LOGIC: Robust Message Extraction for WAHA / webjs shapes ---
 
-    details = {
-        "chat_id": get_first_valid("chatId", "remoteJid"),
-        "sender_id": get_first_valid("author", "from"),
-        "text": get_first_valid("caption", "text", "body", "message"),
-        "media_url": get_first_valid("fileUrl", "mediaUrl", "url"),
+def _normalize_last_message_obj(lm):
+    """
+    Accepts a lastMessage-like object that may contain an inner '_data' dict
+    and returns a flattened dict with common keys.
+    """
+    if not isinstance(lm, dict):
+        return {}
+
+    lm_data = lm.get('_data') if '_data' in lm and isinstance(lm.get('_data'), dict) else lm
+
+    normalized = {
+        "body": lm_data.get("body") or lm_data.get("caption") or "",
+        "from": lm_data.get("from") or lm_data.get("remote") or lm.get("from") or lm.get("remote"),
+        "author": None,
+        # author can be inside nested dicts; try a few fallbacks
+        "author": lm_data.get("author") or (lm_data.get("participant") and lm_data.get("participant").get("_serialized")) if isinstance(lm_data.get("participant"), dict) else lm_data.get("author"),
+        "hasMedia": bool(lm_data.get("hasMedia") or lm.get("hasMedia")),
+        "deprecatedMms3Url": lm_data.get("deprecatedMms3Url") or lm_data.get("mmsUrl") or lm_data.get("fileUrl") or lm.get("mediaUrl"),
+        "fileUrl": lm_data.get("fileUrl") or lm.get("mediaUrl") or lm.get("mmsUrl"),
+        # keep raw dict available for edge-cases
+        "_raw": lm_data
     }
-    log_print(f"Extracted Details: ChatID={details['chat_id']}, Sender={details['sender_id']}, MediaURL={details['media_url'] is not None}")
-    return details
+    return normalized
 
-def download_media(url: str) -> bytes:
-    """Downloads media content from a URL using the Evolution API key."""
-    log_print(f"Downloading media from URL: {url}")
+
+def extract_messages_from_payload(payload):
+    """
+    Find and return a list of normalized message dicts from WAHA / webjs payloads.
+    Handles:
+      - { "event": "message", ... }
+      - { "event": { "event":"message_create", "data":[ ... ] } }
+      - { "event": { "event":"unread_count", "data":[ { "lastMessage": {...} }, ... ] } }
+      - { "messages": [ ... ] } (common other shape)
+    Each returned message is a dict with keys: body, from, author, deprecatedMms3Url, fileUrl, hasMedia, _raw
+    """
+    try:
+        # defensive: if payload is a JSON string
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+    except Exception:
+        # leave as-is
+        pass
+
+    # If the top-level is a message object (common fallback)
+    if payload.get("event") == "message" or payload.get("type") == "message":
+        log_print("Detected top-level 'message' event.", level="DEBUG")
+        return [ _normalize_last_message_obj(payload) ]
+
+    # If messages list provided
+    if isinstance(payload.get("messages"), list):
+        log_print("Detected 'messages' array at top-level.", level="DEBUG")
+        return [ _normalize_last_message_obj(m) for m in payload.get("messages") if isinstance(m, dict) ]
+
+    evt = payload.get("event")
+    # Nested event object (the WAHA log shows this)
+    if isinstance(evt, dict):
+        inner_type = evt.get("event")
+        log_print(f"Detected nested event type: '{inner_type}'", level="DEBUG")
+
+        if inner_type == "message_create":
+            data = evt.get("data", [])
+            msgs = []
+            for d in data:
+                # these items are usually already message dicts
+                normalized = _normalize_last_message_obj(d)
+                # If not normalized (empty), try more aggressive fallback:
+                if not normalized["body"] and isinstance(d, dict):
+                    normalized = _normalize_last_message_obj(d.get("message") or d.get("lastMessage") or d)
+                msgs.append(normalized)
+            return msgs
+
+        if inner_type == "unread_count":
+            data = evt.get("data", [])
+            msgs = []
+            for item in data:
+                # WAHA sends item["lastMessage"] with inner "_data"
+                lm = item.get("lastMessage") or item.get("last_message") or item.get("message")
+                if not lm:
+                    continue
+                normalized = _normalize_last_message_obj(lm)
+                msgs.append(normalized)
+            return msgs
+
+    # As a last resort, try to find any 'lastMessage' fields anywhere in the JSON
+    found = []
+    def _walk_for_last_message(obj):
+        if isinstance(obj, dict):
+            if "lastMessage" in obj:
+                found.append(obj["lastMessage"])
+            for v in obj.values():
+                _walk_for_last_message(v)
+        elif isinstance(obj, list):
+            for el in obj:
+                _walk_for_last_message(el)
+
+    _walk_for_last_message(payload)
+    if found:
+        log_print(f"Found {len(found)} 'lastMessage' objects via fallback walk.", level="DEBUG")
+        return [ _normalize_last_message_obj(lm) for lm in found ]
+
+    log_print("No messages found in payload by extractor.", level="DEBUG")
+    return []
+
+
+def extract_text_from_payload(msg_obj):
+    """Extracts caption or body text from a normalized message object."""
+    if not isinstance(msg_obj, dict):
+        return ""
+    text = (msg_obj.get("body") or msg_obj.get("caption") or "")
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
+def extract_media_url(msg_obj):
+    """Extracts a media URL from a normalized message object."""
+    if not isinstance(msg_obj, dict):
+        return None
+    # prefer explicit fields
+    for k in ("deprecatedMms3Url", "fileUrl"):
+        url = msg_obj.get(k)
+        if url:
+            return url
+    # fallback into raw
+    raw = msg_obj.get("_raw") or {}
+    return raw.get("fileUrl") or raw.get("mediaUrl") or raw.get("mmsUrl")
+
+
+# --- Other Helper Functions --- (download_media, forward_receipt, etc. remain mostly the same)
+def download_media(url):
     headers = {"apikey": EVOLUTION_API_KEY} if EVOLUTION_API_KEY else {}
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        log_print("Media download successful.")
-        return response.content
-    except requests.RequestException as e:
-        log_print(f"Failed to download media. Error: {e}", level="ERROR")
-        raise
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    return response.content
 
-def process_receipt_task(customer_name: str, media_url: str, chat_id: str):
-    """Background task to download, encrypt, and store a receipt image."""
-    log_print(f"[THREAD] Starting background receipt processing for '{customer_name}'.")
-    try:
-        image_data = download_media(media_url)
-        encrypted_data = encrypt_image(image_data)
-        
-        filename = f"{uuid.uuid4().hex}.enc"
-        image_path = os.path.join(IMAGES_DIR, filename)
-        
-        with open(image_path, "wb") as f:
-            f.write(encrypted_data)
-            
-        receipt_id = store_receipt(customer_name, image_path, chat_id)
-        log_event("receipt_stored", {"receipt_id": receipt_id, "customer": customer_name})
-        log_print(f"[THREAD] Stored receipt {receipt_id} for '{customer_name}'. Task finished.")
-    except Exception as e:
-        log_print(f"[THREAD] Error in process_receipt_task for '{customer_name}'. Error: {e}", level="ERROR")
-        log_event("receipt_process_error", {"customer": customer_name, "error": str(e)})
-
-def process_query_task(query_text: str, chat_id: str):
-    """Background task to find a matching receipt and forward it."""
-    log_print(f"[THREAD] Starting background query processing for: '{query_text}'.")
-    try:
-        conn = get_db_connection()
-        matched_id, score = find_match_in_db(query_text, conn)
-        conn.close()
-
-        if matched_id and score >= MATCH_THRESHOLD:
-            log_print(f"[THREAD] 🎯 MATCH FOUND | Query: '{query_text}' | ReceiptID: {matched_id} | Score: {score}")
-            receipt = get_receipt_by_id(matched_id)
-            if receipt:
-                forward_receipt_to_telegram(receipt)
-        else:
-            log_print(f"[THREAD] 🤷 No match found for query: '{query_text}'.")
-    except Exception as e:
-        log_print(f"[THREAD] Error in process_query_task for '{query_text}'. Error: {e}", level="ERROR")
-    log_print(f"[THREAD] Query task for '{query_text}' finished.")
-
-def forward_receipt_to_telegram(receipt_row: dict):
-    """Decrypts, forwards a receipt to Telegram, and marks it as forwarded."""
-    receipt_id = receipt_row["id"]
+def forward_receipt_to_telegram_and_mark(receipt_row):
     path = receipt_row["image_path"]
-    log_print(f"Preparing to forward receipt {receipt_id} to Telegram.")
-    
-    if not os.path.exists(path):
-        log_print(f"File missing: {path} for receipt ID {receipt_id}", level="ERROR")
-        return
-
+    if not path or not os.path.exists(path):
+        log_print(f"Receipt file missing: {path} for receipt ID {receipt_row['id']}", level="ERROR")
+        return False
     try:
         with open(path, "rb") as f:
             decrypted_data = decrypt_image(f.read())
-        
         image_stream = io.BytesIO(decrypted_data)
-        metadata = {
-            "receipt_id": receipt_id, "customer_name": receipt_row["customer_name"],
-            "source_group": receipt_row["source_group"], "timestamp": receipt_row["timestamp"]
-        }
-        
-        log_print(f"Calling async forward_to_bot for receipt {receipt_id}...")
+        metadata = {"receipt_id": receipt_row["id"], "customer_name": receipt_row["customer_name"], "source_group": receipt_row["source_group"], "timestamp": receipt_row["timestamp"]}
         asyncio.run(forward_to_bot(image_stream, metadata))
-        
-        mark_receipt_forwarded(receipt_id)
-        log_print(f"Successfully forwarded receipt {receipt_id} to Telegram and marked in DB.")
-        log_event("forwarded_to_telegram", metadata)
+        mark_receipt_forwarded(receipt_row["id"])
+        log_print(f"Forwarded receipt {receipt_row['id']} to Telegram.")
+        return True
     except Exception as e:
-        log_print(f"Failed forwarding receipt {receipt_id} to Telegram. Error: {e}", level="ERROR")
+        log_print(f"Failed forwarding receipt {receipt_row['id']} to Telegram. Error: {e}", level="ERROR")
+        return False
 
-# ==============================================================================
-#  FLASK WEBHOOK ENDPOINT
-# ==============================================================================
+
+# --- Flask Routes ---
 
 @app.route('/')
 def index():
-    return "<h1>✅ WhatsApp Agent is Running!</h1>"
+    return "<h1>WhatsApp Agent is Running!</h1>"
+
 
 @app.route('/whatsapp_webhook', methods=['POST'])
 def webhook():
-    """Receives webhook, validates, and dispatches tasks to background threads."""
-    log_print("--- 📨 WEBHOOK HIT ---")
-    data = request.get_json()
-    if not data or "messages" not in data:
-        log_print("Webhook received with invalid or empty JSON body.", level="WARNING")
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+    log_print("--- 📨 Endpoint Hit: /whatsapp_webhook ---")
 
-    log_print(f"Webhook contains {len(data.get('messages', []))} message(s). Starting processing loop...")
-    for msg in data.get("messages", []):
-        details = extract_message_details(msg)
-        chat_id = details["chat_id"]
-        
-        # Skip if there's no chat ID (e.g., status updates or other events)
-        if not chat_id:
-            log_print("Skipping message with no Chat ID.", level="WARNING")
+    try:
+        data = request.get_json(silent=True)
+        if data is None:
+            raw = request.data.decode(errors='ignore')
+            log_print(f"Request JSON parse failed. Raw body: {raw[:1000]}", level="ERROR")
+            return jsonify({"status": "error", "reason": "invalid_json"}), 400
+    except Exception as e:
+        log_print(f"Failed to parse request body as JSON. Error: {e}", level="ERROR")
+        return jsonify({"status": "error"}), 400
+
+    # log the incoming payload (shortened)
+    try:
+        pretty = json.dumps(data, indent=2) if isinstance(data, dict) else str(data)
+        log_print(f"Incoming payload (truncated): {pretty[:2000]}", level="DEBUG")
+    except Exception:
+        log_print("Incoming payload (unable to stringify)", level="DEBUG")
+
+    # 1. --- Use the improved extractor to find messages ---
+    messages = extract_messages_from_payload(data)
+
+    if not messages:
+        log_print("Webhook did not contain any processable messages. Task complete.", level="DEBUG")
+        return jsonify({"status": "ok", "message": "No messages to process"}), 200
+
+    log_print(f"Successfully extracted {len(messages)} message(s) to process.", level="DEBUG")
+
+    # 2. --- Process each extracted message ---
+    for idx, msg in enumerate(messages):
+        # normalized fields
+        chat_id = msg.get("from")
+        sender_id = msg.get("author")
+        text = extract_text_from_payload(msg)
+        media_url = extract_media_url(msg)
+
+        # Print full per-message debug so you can see that WAHA's payload arrived
+        log_print(f"Message[{idx}] -> group: {chat_id}, author: {sender_id}, text: '{text[:200]}', media: {'Yes' if media_url else 'No'}", level="DEBUG")
+
+        # validate group and sender (only groups processed)
+        if not chat_id or not isinstance(chat_id, str) or "@g.us" not in chat_id:
+            log_print(f"Skipping non-group or malformed chat_id: {chat_id}", level="DEBUG")
             continue
 
-        text = details["text"] or ""
-        media_url = details["media_url"]
-        sender_id = details["sender_id"]
+        # --- RECC detection (case-insensitive, tolerant) ---
+        customer_name = None
+        if text:
+            m = re.search(r'\brecc\s+(.+)', text, flags=re.IGNORECASE)
+            if m:
+                customer_name = m.group(1).strip()
+                log_print(f"🧾 Detected 'recc' keyword. Extracted customer_name: '{customer_name}'", level="INFO")
 
-        # --- Message Routing Logic ---
-        # Case 1: Message contains the receipt keyword (e.g., "recc John Doe")
-        if RECEIPT_KEYWORD in text.lower():
-            log_print(f"Routing -> Receipt message detected.")
-            customer_name = text.lower().split(RECEIPT_KEYWORD, 1)[1].strip()
-            
-            image_to_process_url = media_url
-            if not image_to_process_url:
-                cache_key = (chat_id, sender_id)
-                if cache_key in recent_image_cache:
-                    image_to_process_url = recent_image_cache.pop(cache_key)['url']
-                    log_print(f"🧠 Found recent image in cache for {cache_key}.")
+        # 3. --- Process "recc <name>" messages ---
+        if customer_name:
+            try:
+                image_to_process_url = media_url
+                # if no media attached, try to find recent cached image for (group, author)
+                if not image_to_process_url:
+                    cache_key = (chat_id, sender_id)
+                    cached = recent_image_cache.get(cache_key)
+                    if cached:
+                        age = (datetime.now() - cached["timestamp"]).total_seconds()
+                        if age <= CACHE_EXPIRATION_SECONDS:
+                            image_to_process_url = cached["url"]
+                            log_print(f"🧠 Found recent image in cache for {cache_key} (age {age:.1f}s).", level="DEBUG")
+                            # consume it
+                            try:
+                                del recent_image_cache[cache_key]
+                            except KeyError:
+                                pass
+                        else:
+                            # expired
+                            log_print(f"Found cached image for {cache_key} but it expired (age {age:.1f}s).", level="DEBUG")
+                            try:
+                                del recent_image_cache[cache_key]
+                            except KeyError:
+                                pass
 
-            if image_to_process_url and customer_name:
-                thread = threading.Thread(target=process_receipt_task, args=(customer_name, image_to_process_url, chat_id))
-                thread.start()
-                log_print(f"Dispatched background thread for receipt: '{customer_name}'.")
-            else:
-                log_print(f"Received '{RECEIPT_KEYWORD}' for '{customer_name}' but no associated image.", level="WARNING")
+                if image_to_process_url:
+                    image_data = download_media(image_to_process_url)
+                    encrypted_data = encrypt_image(image_data)
+                    filename = f"{uuid.uuid4().hex}.enc"
+                    image_path = os.path.join(IMAGES_DIR, filename)
+                    with open(image_path, "wb") as f:
+                        f.write(encrypted_data)
 
-        # Case 2: Message is just an image (cache it)
-        elif media_url:
-            log_print(f"Routing -> Image-only message detected.")
+                    receipt_id = store_receipt(customer_name, image_path, chat_id)
+                    log_event("receipt_stored", {"receipt_id": receipt_id, "customer": customer_name})
+                    log_print(f"Stored receipt {receipt_id} for '{customer_name}'.")
+                else:
+                    log_print(f"Received 'recc' for '{customer_name}' but no associated image found.", level="WARNING")
+            except Exception as e:
+                log_print(f"Error processing 'recc' message. Error: {e}", level="ERROR")
+            # done with this message
+            continue
+
+        # 4. --- If message contains a media (image) -> cache it for potential later 'recc' command ---
+        if media_url:
             cache_key = (chat_id, sender_id)
             recent_image_cache[cache_key] = {"url": media_url, "timestamp": datetime.now()}
-            log_print(f"🖼️  Cached image from {cache_key}. Cache size: {len(recent_image_cache)}.")
+            log_print(f"🖼️  Cached image from {cache_key}. Cache size: {len(recent_image_cache)}.", level="DEBUG")
+            continue
 
-        # Case 3: Message is just text (treat as a query)
-        elif text:
-            log_print(f"Routing -> Text-only query detected.")
-            thread = threading.Thread(target=process_query_task, args=(text, chat_id))
-            thread.start()
-            log_print(f"Dispatched background thread for query: '{text[:50]}...'.")
+        # 5. --- If plain text (not 'recc') -> try to match stored receipts ---
+        if text:
+            try:
+                conn = get_db_connection()
+                matched_id, score = find_match_in_db(text, conn)
+                conn.close()
+                if matched_id and score >= MATCH_THRESHOLD:
+                    log_print(f"🎯 MATCH FOUND | Query: '{text}' | ReceiptID: {matched_id} | Score: {score}")
+                    receipt = get_receipt_by_id(matched_id)
+                    if receipt:
+                        forward_receipt_to_telegram_and_mark(receipt)
+                else:
+                    log_print(f"🔎 No match for query: '{text}'. Score: {score if matched_id else 'N/A'}", level="DEBUG")
+            except Exception as e:
+                log_print(f"Error during match check for query: '{text}'. Error: {e}", level="ERROR")
 
-    # Clean up expired cache items after processing all messages
-    now = datetime.now()
-    expired_keys = [k for k, v in recent_image_cache.items() if now - v['timestamp'] > timedelta(seconds=CACHE_EXPIRATION_SECONDS)]
-    if expired_keys:
-        log_print(f"🧹 Cleaning up {len(expired_keys)} expired cache entries.")
-        for key in expired_keys:
-            del recent_image_cache[key]
+    return jsonify({"status": "processed"}), 200
 
-    log_print("--- ✅ WEBHOOK PROCESSING COMPLETE ---")
-    return jsonify({"status": "acknowledged"}), 200
 
 if __name__ == '__main__':
-    log_print("Starting Flask web server...")
-    # debug=False is recommended when using threading to avoid Flask's reloader causing issues.
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # debug True here is fine during development; for production set debug=False
+    app.run(host='0.0.0.0', port=5000, debug=True)
