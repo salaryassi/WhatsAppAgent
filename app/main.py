@@ -50,34 +50,38 @@ with app.app_context():
 
 # In app/main.py, replace the existing function with this one.
 
+# In app/main.py, replace the existing function with this final version.
+
 def extract_messages_from_payload(payload):
     """
     Intelligently finds and returns a list of message objects from various webhook event types.
-    This is the key function to handle WAHA's complex JSON structure.
+    This version is robust and handles different JSON structures from WAHA without crashing.
     """
-    # The actual event data is nested inside the 'event' key.
-    event_data = payload.get('event', {})
+    event_data = payload.get('event')
     
-    # Get the type of the event (e.g., 'message_create').
-    event_type = event_data.get('event')
+    # --- THIS IS THE CRITICAL FIX ---
+    # Check if event_data is a dictionary. If not, it's a simple event with no message.
+    if not isinstance(event_data, dict):
+        log_print(f"Received simple event of type: '{event_data}'. No message to process.", level="DEBUG")
+        return [] # Return empty list and stop.
 
-    log_print(f"Received event of type: '{event_type}'", level="DEBUG")
+    # If we get here, we know event_data is a dictionary, so .get() is safe.
+    event_type = event_data.get('event')
+    log_print(f"Received nested event of type: '{event_type}'", level="DEBUG")
 
     if event_type == 'message_create':
-        # For new messages, the message objects are in the 'data' list INSIDE the 'event_data' object.
+        # For new messages, the data is inside this dictionary.
         return event_data.get('data', [])
         
     elif event_type == 'unread_count':
-        # For unread counts, the logic is more nested.
         messages = []
-        # The path is event -> data -> lastMessage
         unread_chats = event_data.get('data', [])
         for chat in unread_chats:
             if 'lastMessage' in chat:
                 messages.append(chat['lastMessage'])
         return messages
         
-    # For all other events, return an empty list.
+    # For all other event types, return an empty list.
     return []
 
 def extract_text_from_payload(msg_obj):
