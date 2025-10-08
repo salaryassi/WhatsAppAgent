@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   waha:
     image: devlikeapro/waha:latest  # Use a specific tag if preferred, e.g., :2024.10
@@ -7,11 +9,8 @@ services:
     volumes:
       - ./waha_data:/app/data  # Persistent storage for WAHA sessions and data
     environment:
-      - WAHA_ENGINE=NOWEB  # Or VENOM/others; configure based on your needs (see WAHA docs)
+      - WAHA_ENGINE=NOWEB  # Or VENOM/others; configure based on your needs
       - WAHA_WEBHOOK_SECRET=${WEBHOOK_SECRET}  # Pull from .env to match your app's secret
-      - FLASK_APP=main:app
-   # <-- Make sure 'app' is the variable in app/app.py
-      - FLASK_ENV=development   # Optional, for auto-reload
       # Add other WAHA env vars as needed, e.g., for webhook URL
     restart: unless-stopped 
 
@@ -25,6 +24,9 @@ services:
       - ./sessions:/app/sessions  # Persistent session storage
     env_file:
       - .env
+    environment:
+      - FLASK_APP=main:app      # Tell Flask to use main.py's 'app' variable
+      - FLASK_ENV=development   # Optional, for auto-reload
     depends_on:
       - waha
     command: flask run --host=0.0.0.0 --port=5050
