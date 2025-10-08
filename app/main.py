@@ -8,6 +8,8 @@ import asyncio
 import json
 import uuid
 from fuzzywuzzy import fuzz
+from datetime import datetime, timedelta # Add this import
+
 
 from .config import WEBHOOK_SECRET, EVOLUTION_API_KEY, IMAGES_DIR, MATCH_THRESHOLD
 from .database import (
@@ -19,6 +21,8 @@ from .encryption import encrypt_image, decrypt_image
 from .telegram_bot import forward_to_bot, send_admin_notification
 from .utils import find_match_in_db
 
+recent_image_cache = {}
+CACHE_EXPIRATION_SECONDS = 120
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
@@ -131,12 +135,17 @@ logging.basicConfig(
 @app.route('/whatsapp_webhook', methods=['POST'], endpoint='whatsapp_webhook')
 def webhook():
     logging.info("📩 Incoming webhook request received")
+    data = request.get_json(force=True)
 
-    try:
-        data = request.get_json(force=True)
-    except Exception as e:
-        logging.error(f"❌ Failed to parse JSON body: {e}")
-        return jsonify({"status": "invalid_json"}), 400
+    # Clean up expired entries from the cache
+    expired_keys = [
+        key for key, value in recent_image_cache.items()
+        if datetime.now() - value['timestamp'] > timedelta(seconds=CACHE_EXPIRATION_SECONDS)
+    ]
+    for key in expired_keys:
+        del recent_image_cache[key]
+        logging.info(f"🧹 Expired image from cache for key: {key}")
+
 
     messages = data.get("messages", [])
     if not messages:
@@ -145,46 +154,93 @@ def webhook():
 
     for msg in messages:
         chat_id = msg.get("chatId", "")
-        sender_name = msg.get("senderName", "").strip()
-        text = msg.get("body", "").strip()
+        # IMPORTANT: You need the sender's unique ID, not just display name
+        sender_id = msg.get("author") or msg.get("sender", {}).get("id") or msg.get("from")
+        text = extract_text_from_payload(msg) or ""
+        media_url = extract_media_url(msg)
 
-        logging.info(f"📨 Processing message from '{sender_name}' in '{chat_id}' — text: '{text}'")
-
-        # --- Only process group messages ---
-        if not chat_id.endswith("@g.us"):
-            logging.info(f"➡️ Ignored message (not a group): {chat_id}")
+        if not chat_id.endswith("@g.us") or not sender_id:
+            logging.info("➡️ Ignoring message (not a group or no sender ID)")
             continue
 
-        # --- Log query ---
-        try:
-            log_query(
-                customer_name=sender_name,
-                query_group=chat_id,
-                matched_receipt_id=None,
-                status="received"
-            )
-            logging.info(f"✅ Logged message from '{sender_name}' in group '{chat_id}'")
-        except Exception as e:
-            logging.error(f"❌ Error logging message for '{sender_name}' in '{chat_id}': {e}")
-            continue
+        logging.info(f"📨 Processing message from '{sender_id}' in '{chat_id}'")
 
-        # --- Match check ---
-        try:
-            conn = get_db_connection()
-            matched_receipt_id, best_score = find_match_in_db(sender_name, conn)
-            conn.close()
+        # --- LOGIC FOR "RECC" KEYWORD ---
+        if "recc " in text.lower():
+            try:
+                # Extract name which comes after "recc "
+                customer_name = text.lower().split("recc ", 1)[1].strip()
+                logging.info(f"🧾 Found 'recc' keyword for customer: '{customer_name}'")
 
-            if matched_receipt_id:
-                logging.info(
-                    f"🎯 MATCH FOUND | Sender: '{sender_name}' | Group: '{chat_id}' | ReceiptID: {matched_receipt_id} | Score: {best_score}"
-                )
-                # TODO: Add Telegram forward here if needed
-            else:
-                logging.info(f"🔎 No match found for '{sender_name}' in '{chat_id}'")
-        except Exception as e:
-            logging.error(f"❌ Error checking match for '{sender_name}' in '{chat_id}': {e}")
+                image_to_process_url = None
 
-    logging.info("✅ Finished processing webhook batch")
+                # Case 1: Image is sent with "recc" in the caption
+                if media_url:
+                    logging.info("✅ Found image in the same message as 'recc'.")
+                    image_to_process_url = media_url
+                
+                # Case 2: "recc" is in a text message, look for a recent image
+                else:
+                    cache_key = (chat_id, sender_id)
+                    if cache_key in recent_image_cache:
+                        logging.info(f"🧠 Found recent image in cache for {cache_key}.")
+                        image_to_process_url = recent_image_cache[cache_key]['url']
+                        del recent_image_cache[cache_key] # Remove after use
+
+                if image_to_process_url:
+                    # Download, encrypt, and store the receipt
+                    image_data = download_media(image_to_process_url)
+                    encrypted_data = encrypt_image(image_data)
+                    
+                    filename = f"{uuid.uuid4().hex}.enc"
+                    image_path = os.path.join(IMAGES_DIR, filename)
+                    
+                    with open(image_path, "wb") as f:
+                        f.write(encrypted_data)
+                    
+                    receipt_id = store_receipt(customer_name, image_path, chat_id)
+                    log_event("receipt_stored", {"receipt_id": receipt_id, "customer": customer_name})
+                    logging.info(f"✅ Stored receipt {receipt_id} for '{customer_name}' from group '{chat_id}'")
+                else:
+                    logging.warning(f"⚠️ Received 'recc' for '{customer_name}' but could not find an associated image.")
+
+            except Exception as e:
+                logging.error(f"❌ Error processing 'recc' message: {e}")
+
+        # --- LOGIC FOR CACHING AN IMAGE ---
+        elif media_url:
+            cache_key = (chat_id, sender_id)
+            recent_image_cache[cache_key] = {
+                "url": media_url,
+                "timestamp": datetime.now()
+            }
+            logging.info(f"🖼️ Cached image from {cache_key}. Cache size is now {len(recent_image_cache)}.")
+
+        # --- LOGIC FOR MATCHING A NAME (NO KEYWORD, NO IMAGE) ---
+        else:
+            try:
+                # Use sender's name from text as the customer name to query
+                customer_name_query = text.strip()
+                if not customer_name_query:
+                    continue
+
+                conn = get_db_connection()
+                matched_receipt_id, best_score = find_match_in_db(customer_name_query, conn)
+                conn.close()
+
+                if matched_receipt_id and best_score >= MATCH_THRESHOLD:
+                    logging.info(f"🎯 MATCH FOUND | Query: '{customer_name_query}' | Group: '{chat_id}' | ReceiptID: {matched_receipt_id} | Score: {best_score}")
+                    # Here you would trigger the verification message and forwarding flow
+                    receipt_row = get_receipt_by_id(matched_receipt_id)
+                    if receipt_row:
+                       forward_receipt_to_telegram_and_mark(receipt_row)
+
+                else:
+                    logging.info(f"🔎 No match found for query: '{customer_name_query}' in '{chat_id}'")
+            except Exception as e:
+                logging.error(f"❌ Error during match check for '{text}': {e}")
+
+
     return jsonify({"status": "processed"}), 200
 
 if __name__ == '__main__':

@@ -1,0 +1,531 @@
+# File: encryption.py
+from cryptography.fernet import Fernet
+from .config import ENCRYPTION_KEY
+
+cipher_suite = Fernet(ENCRYPTION_KEY.encode())
+
+def encrypt_image(image_data):
+    return cipher_suite.encrypt(image_data)
+
+def decrypt_image(encrypted_data):
+    return cipher_suite.decrypt(encrypted_data)
+
+
+# File: extract.py
+import os
+
+source_dir = "./app"
+output_file = "all_python_code.txt"
+
+all_code = []
+
+for filename in os.listdir(source_dir):
+    if filename.endswith(".py"):
+        path = os.path.join(source_dir, filename)
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+            all_code.append(f"# File: {filename}\n{content}\n\n")
+
+with open(output_file, "w", encoding="utf-8") as f:
+    f.write("\n".join(all_code))
+
+print(f"All .py files from {source_dir} written to {output_file}")
+
+
+
+# File: __init__.py
+
+
+
+# File: main.py
+# app/main.py
+from flask import Flask, request, jsonify
+import os
+import logging
+import requests
+import io
+import asyncio
+import json
+import uuid
+from fuzzywuzzy import fuzz
+
+from .config import WEBHOOK_SECRET, EVOLUTION_API_KEY, IMAGES_DIR, MATCH_THRESHOLD
+from .database import (
+    setup_database, store_receipt, log_query,
+    get_receipt_by_id, mark_receipt_forwarded, log_event,
+    get_unforwarded_receipts
+)
+from .encryption import encrypt_image, decrypt_image
+from .telegram_bot import forward_to_bot, send_admin_notification
+from .utils import find_match_in_db
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+app = Flask(__name__)
+
+# Ensure DB and images dir exist
+setup_database()
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+
+def extract_text_from_payload(data):
+    """Try various locations for text in the webhook payload."""
+    candidates = [
+        data.get("caption"),
+        data.get("text"),
+        (data.get("message") or {}).get("caption") if isinstance(data.get("message"), dict) else None,
+        (data.get("message") or {}).get("text") if isinstance(data.get("message"), dict) else None,
+        data.get("body"),
+        data.get("message", {}).get("body") if isinstance(data.get("message"), dict) else None
+    ]
+    for c in candidates:
+        if c:
+            return c
+    # fallback: scan values
+    for v in data.values():
+        if isinstance(v, str) and len(v) < 200:
+            return v
+    return None
+
+
+def extract_media_url(data):
+    """Find a media URL in the payload."""
+    keys = ["fileUrl", "mediaUrl", "url", "downloadUrl", "imageUrl"]
+    msg = data.get("message") or {}
+    # check top-level
+    for k in keys:
+        if data.get(k):
+            return data[k]
+    # check nested
+    if isinstance(msg, dict):
+        for k in keys:
+            if msg.get(k):
+                return msg[k]
+        # check attachments/media
+        attachments = msg.get("attachments") or msg.get("media") or []
+        if attachments:
+            first = attachments[0]
+            if isinstance(first, dict):
+                for k in keys:
+                    if first.get(k):
+                        return first[k]
+    return None
+
+
+def download_media(url):
+    """Download bytes from a media URL, optionally using API key."""
+    headers = {"apikey": EVOLUTION_API_KEY} if EVOLUTION_API_KEY else {}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.content
+
+
+def send_verification_message_to_group(group_jid, customer_name):
+    from .evolution_api import send_whatsapp_message
+    message = f"Verification: we detected a query for *{customer_name}*. Please confirm by replying 'YES'."
+    try:
+        send_whatsapp_message(group_jid, message)
+        log_event("sent_verification", {"group": group_jid, "customer_name": customer_name})
+    except Exception as e:
+        logging.exception("Failed to send verification message")
+        log_event("send_verification_error", {"group": group_jid, "error": str(e)})
+
+
+def forward_receipt_to_telegram_and_mark(receipt_row):
+    """Decrypt and forward a receipt to Telegram, mark as forwarded."""
+    path = receipt_row["image_path"]
+    if not path or not os.path.exists(path):
+        logging.error("Receipt file missing: %s", path)
+        log_event("missing_file", {"receipt_id": receipt_row["id"], "path": path})
+        return False
+    try:
+        with open(path, "rb") as f:
+            decrypted = decrypt_image(f.read())
+        bio = io.BytesIO(decrypted)
+        bio.seek(0)
+        metadata = {
+            "receipt_id": receipt_row["id"],
+            "customer_name": receipt_row["customer_name"],
+            "source_group": receipt_row["source_group"],
+            "timestamp": receipt_row["timestamp"]
+        }
+        asyncio.run(forward_to_bot(bio, metadata))
+        mark_receipt_forwarded(receipt_row["id"])
+        log_event("forwarded_to_telegram", metadata)
+        return True
+    except Exception as e:
+        logging.exception("Failed forwarding to Telegram")
+        log_event("telegram_forward_error", {"receipt_id": receipt_row["id"], "error": str(e)})
+        return False
+
+
+@app.route('/')
+def index():
+    return "<h1>Flask App is Running!</h1>"
+# Configure logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+@app.route('/whatsapp_webhook', methods=['POST'], endpoint='whatsapp_webhook')
+def webhook():
+    logging.info("📩 Incoming webhook request received")
+
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        logging.error(f"❌ Failed to parse JSON body: {e}")
+        return jsonify({"status": "invalid_json"}), 400
+
+    messages = data.get("messages", [])
+    if not messages:
+        logging.warning("⚠️ No messages found in webhook payload")
+        return jsonify({"status": "no_messages"}), 200
+
+    for msg in messages:
+        chat_id = msg.get("chatId", "")
+        sender_name = msg.get("senderName", "").strip()
+        text = msg.get("body", "").strip()
+
+        logging.info(f"📨 Processing message from '{sender_name}' in '{chat_id}' — text: '{text}'")
+
+        # --- Only process group messages ---
+        if not chat_id.endswith("@g.us"):
+            logging.info(f"➡️ Ignored message (not a group): {chat_id}")
+            continue
+
+        # --- Log query ---
+        try:
+            log_query(
+                customer_name=sender_name,
+                query_group=chat_id,
+                matched_receipt_id=None,
+                status="received"
+            )
+            logging.info(f"✅ Logged message from '{sender_name}' in group '{chat_id}'")
+        except Exception as e:
+            logging.error(f"❌ Error logging message for '{sender_name}' in '{chat_id}': {e}")
+            continue
+
+        # --- Match check ---
+        try:
+            conn = get_db_connection()
+            matched_receipt_id, best_score = find_match_in_db(sender_name, conn)
+            conn.close()
+
+            if matched_receipt_id:
+                logging.info(
+                    f"🎯 MATCH FOUND | Sender: '{sender_name}' | Group: '{chat_id}' | ReceiptID: {matched_receipt_id} | Score: {best_score}"
+                )
+                # TODO: Add Telegram forward here if needed
+            else:
+                logging.info(f"🔎 No match found for '{sender_name}' in '{chat_id}'")
+        except Exception as e:
+            logging.error(f"❌ Error checking match for '{sender_name}' in '{chat_id}': {e}")
+
+    logging.info("✅ Finished processing webhook batch")
+    return jsonify({"status": "processed"}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
+
+
+# File: telegram_bot.py
+import json
+import logging
+from datetime import datetime
+
+# Configure logger
+logging.basicConfig(
+    filename="telegram_log.txt",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+# Simulate the same function interface as your real Telegram functions
+
+async def forward_to_bot(image_data, metadata):
+    """
+    Simulates sending image + metadata to Telegram by logging the event.
+    """
+    log_entry = {
+        "event": "forward_to_bot",
+        "status": "simulated",
+        "image_data_type": str(type(image_data)),
+        "metadata": metadata,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    logging.info(json.dumps(log_entry, ensure_ascii=False, indent=2))
+    print("[LOG] Forwarded image (simulated):", metadata.get("receipt_id"))
+
+
+async def send_admin_notification(message):
+    """
+    Simulates sending admin notification via Telegram.
+    """
+    log_entry = {
+        "event": "admin_notification",
+        "status": "simulated",
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    logging.info(json.dumps(log_entry, ensure_ascii=False, indent=2))
+    print("[LOG] Admin notification (simulated):", message)
+
+
+
+# File: config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+FORWARD_TO_BOT_USERNAME = os.getenv("FORWARD_TO_BOT_USERNAME")
+SERVER_UPLOAD_URL = os.getenv("SERVER_UPLOAD_URL")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+DB_PATH = "./receipts.db"
+MONITORED_GROUPS = ["group1@g.us", "group2@g.us"] # Add your WhatsApp group JIDs
+# config.py (add)
+IMAGES_DIR = os.getenv("IMAGES_DIR", "./app/images")
+MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "80"))  # fuzzy match threshold (0-100)
+
+
+
+# File: setup_database.py
+import sqlite3
+
+DB_PATH = "/root/WhatsAppAgent/receipts.db"
+
+def setup_database():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Receipts table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            group_name TEXT,
+            image_path TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Verifications table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS verifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            verified_group TEXT,
+            verified_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+    print(f"✅ Database initialized at {DB_PATH}")
+
+if __name__ == "__main__":
+    setup_database()
+
+
+
+# File: test_flow.py
+# app/test_flow.py
+
+import logging
+from app.database import get_db_connection, setup_database, log_query
+from app.utils import find_match_in_db
+
+# Configure logging to see output in terminal
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# First, ensure database is set up
+setup_database()
+
+# Simulated incoming messages
+incoming_messages = [
+    {"customer_name": "John Doe", "group": "group1@g.us"},
+    {"customer_name": "Jane Smith", "group": "group2@g.us"},
+    {"customer_name": "John Doe", "group": "group2@g.us"},
+    {"customer_name": "Alice", "group": "group3@g.us"},
+]
+
+for msg in incoming_messages:
+    customer_name = msg["customer_name"]
+    query_group = msg["group"]
+
+    # Log the query (simulating webhook received)
+    try:
+        log_query(
+            customer_name=customer_name,
+            query_group=query_group,
+            matched_receipt_id=None,
+            status="received"
+        )
+        logging.info(f"Logged message from {customer_name} in {query_group}")
+    except Exception as e:
+        logging.error(f"Error logging message {customer_name} from {query_group}: {e}")
+
+    # Check for matches in receipts table
+    try:
+        conn = get_db_connection()
+        matched_receipt_id, best_score = find_match_in_db(customer_name, conn)
+        if matched_receipt_id:
+            logging.info(f"Found match for {customer_name}: {matched_receipt_id} (score: {best_score})")
+        else:
+            logging.info(f"No match found for {customer_name}")
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error checking match for {customer_name}: {e}")
+
+
+
+
+# File: utils.py
+from fuzzywuzzy import fuzz
+
+def find_match_in_db(customer_name, db_connection):
+    cursor = db_connection.cursor()
+    cursor.execute("SELECT id, customer_name FROM receipts WHERE forwarded = FALSE")
+    receipts = cursor.fetchall()
+    best_match = None
+    best_score = 0
+    for receipt in receipts:
+        score = fuzz.token_sort_ratio(customer_name, receipt['customer_name'])
+        if score > best_score:
+            best_score = score
+            best_match = receipt['id']
+    return best_match, best_score
+
+
+# File: evolution_api.py
+import requests
+from .config import EVOLUTION_API_URL, EVOLUTION_API_KEY
+
+def send_whatsapp_message(group_jid, message):
+    url = f"{EVOLUTION_API_URL}/api/messages/send"
+    headers = {"apikey": EVOLUTION_API_KEY}
+    payload = {
+        "number": group_jid,
+        "options": {"delay": 1200},
+        "textMessage": {"text": message}
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+
+# File: database.py
+# database.py
+import sqlite3
+import uuid
+from datetime import datetime
+import json
+import os
+from .config import DB_PATH
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def setup_database():
+    conn = get_db_connection()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS receipts (
+            id TEXT PRIMARY KEY,
+            customer_name TEXT,
+            image_path TEXT,
+            source_group TEXT,
+            timestamp DATETIME,
+            forwarded BOOLEAN DEFAULT 0
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS queries (
+            id TEXT PRIMARY KEY,
+            customer_name TEXT,
+            query_group TEXT,
+            timestamp DATETIME,
+            matched_receipt_id TEXT,
+            status TEXT
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            metadata TEXT,
+            timestamp DATETIME
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+def store_receipt(customer_name, image_path, source_group):
+    conn = get_db_connection()
+    rid = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO receipts (id, customer_name, image_path, source_group, timestamp, forwarded) VALUES (?, ?, ?, ?, ?, ?)",
+        (rid, customer_name, image_path, source_group, now, False)
+    )
+    conn.commit()
+    conn.close()
+    return rid
+
+def get_unforwarded_receipts():
+    conn = get_db_connection()
+    cur = conn.execute("SELECT * FROM receipts WHERE forwarded = 0")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def get_receipt_by_id(rid):
+    conn = get_db_connection()
+    cur = conn.execute("SELECT * FROM receipts WHERE id = ?", (rid,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def mark_receipt_forwarded(rid):
+    conn = get_db_connection()
+    conn.execute("UPDATE receipts SET forwarded = 1 WHERE id = ?", (rid,))
+    conn.commit()
+    conn.close()
+
+def log_query(customer_name, query_group, matched_receipt_id=None, status="created"):
+    conn = get_db_connection()
+    qid = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO queries (id, customer_name, query_group, timestamp, matched_receipt_id, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (qid, customer_name, query_group, now, matched_receipt_id, status)
+    )
+    conn.commit()
+    conn.close()
+    return qid
+
+def log_event(action, metadata: dict):
+    conn = get_db_connection()
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO events (action, metadata, timestamp) VALUES (?, ?, ?)",
+        (action, json.dumps(metadata, default=str), now)
+    )
+    conn.commit()
+    conn.close()
+
+
