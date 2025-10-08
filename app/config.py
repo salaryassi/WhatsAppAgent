@@ -15,13 +15,17 @@ FORWARD_TO_BOT_USERNAME = os.getenv("FORWARD_TO_BOT_USERNAME")
 SERVER_UPLOAD_URL = os.getenv("SERVER_UPLOAD_URL")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-DB_PATH = os.getenv("DB_PATH", "receipts.db")
+
 
 # parse MONITORED_GROUPS as list
 _MONITORED_GROUPS_RAW = os.getenv("MONITORED_GROUPS", "")
 MONITORED_GROUPS = [g.strip() for g in _MONITORED_GROUPS_RAW.split(",") if g.strip()]
 import os
 from dotenv import load_dotenv
+
+DB_DIR = "/app/db"
+os.makedirs(DB_DIR, exist_ok=True)
+DB_PATH = os.path.join(DB_DIR, "receipts.db")
 
 load_dotenv()
 

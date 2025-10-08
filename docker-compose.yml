@@ -20,8 +20,9 @@ services:
     ports:
       - "5050:5050"
     volumes:
-      - ./app:/app          # App code
-      - ./sessions:/app/sessions  # Persistent session storage
+      - ./app:/app
+      - ./sessions:/app/sessions
+      - ./db:/app/db   # <--- this is new
     env_file:
       - .env
     environment:
