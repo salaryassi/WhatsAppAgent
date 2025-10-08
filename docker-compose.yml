@@ -17,7 +17,7 @@ services:
     container_name: app
     ports:
       - "5050:5050"
-    vvolumes:
+    volumes:
       - ./app:/app          # App code
       - ./sessions:/app/sessions  # Persistent session storage
     env_file:
