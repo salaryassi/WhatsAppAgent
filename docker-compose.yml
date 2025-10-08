@@ -17,10 +17,9 @@ services:
     container_name: app
     ports:
       - "5050:5050"
-    volumes:
-      - ./app/images:/app/images
-      - ./app/uploads:/app/uploads
-      - ./app/logs:/app/logs
+    vvolumes:
+      - ./app:/app          # App code
+      - ./sessions:/app/sessions  # Persistent session storage
     env_file:
       - .env
     depends_on:
