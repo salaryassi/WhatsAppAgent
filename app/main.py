@@ -48,40 +48,42 @@ with app.app_context():
 
 # --- CORE LOGIC: Smartly Extract Data from Webhooks ---
 
-# In app/main.py, replace the existing function with this one.
-
-# In app/main.py, replace the existing function with this final version.
+# In app/main.py, replace the existing function with this final, definitive version.
 
 def extract_messages_from_payload(payload):
     """
     Intelligently finds and returns a list of message objects from various webhook event types.
-    This version is robust and handles different JSON structures from WAHA without crashing.
+    This version handles both simple 'message' events and nested 'message_create' events.
     """
-    event_data = payload.get('event')
+    event_type = payload.get('event')
     
-    # --- THIS IS THE CRITICAL FIX ---
-    # Check if event_data is a dictionary. If not, it's a simple event with no message.
-    if not isinstance(event_data, dict):
-        log_print(f"Received simple event of type: '{event_data}'. No message to process.", level="DEBUG")
-        return [] # Return empty list and stop.
+    # --- SCENARIO 1: The event is a simple string 'message' ---
+    # In this case, the payload itself contains the message data.
+    if event_type == 'message':
+        log_print(f"Detected a simple '{event_type}' event. Processing the payload directly.", level="DEBUG")
+        # We wrap the payload in a list to match the function's expected return type.
+        return [payload]
 
-    # If we get here, we know event_data is a dictionary, so .get() is safe.
-    event_type = event_data.get('event')
-    log_print(f"Received nested event of type: '{event_type}'", level="DEBUG")
+    # --- SCENARIO 2: The event is a nested dictionary ---
+    if isinstance(event_type, dict):
+        nested_event_data = event_type
+        nested_event_type = nested_event_data.get('event')
+        log_print(f"Detected a nested '{nested_event_type}' event.", level="DEBUG")
 
-    if event_type == 'message_create':
-        # For new messages, the data is inside this dictionary.
-        return event_data.get('data', [])
+        if nested_event_type == 'message_create':
+            return nested_event_data.get('data', [])
         
-    elif event_type == 'unread_count':
-        messages = []
-        unread_chats = event_data.get('data', [])
-        for chat in unread_chats:
-            if 'lastMessage' in chat:
-                messages.append(chat['lastMessage'])
-        return messages
-        
-    # For all other event types, return an empty list.
+        elif nested_event_type == 'unread_count':
+            messages = []
+            unread_chats = nested_event_data.get('data', [])
+            for chat in unread_chats:
+                if 'lastMessage' in chat:
+                    messages.append(chat['lastMessage'])
+            return messages
+    
+    # --- SCENARIO 3: It's another type of simple event (e.g., 'session.status') ---
+    # We safely ignore it.
+    log_print(f"Ignoring simple event of type: '{event_type}'. No message to process.", level="DEBUG")
     return []
 
 def extract_text_from_payload(msg_obj):
