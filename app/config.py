@@ -16,3 +16,6 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 DB_PATH = "receipts.db"
 MONITORED_GROUPS = ["group1@g.us", "group2@g.us"] # Add your WhatsApp group JIDs
+# config.py (add)
+IMAGES_DIR = os.getenv("IMAGES_DIR", "./app/images")
+MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "80"))  # fuzzy match threshold (0-100)

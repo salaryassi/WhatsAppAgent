@@ -1,26 +1,40 @@
-from pyrogram import Client
 import json
-from .config import (
-    TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN,
-    FORWARD_TO_BOT_USERNAME, ADMIN_CHAT_ID
+import logging
+from datetime import datetime
+
+# Configure logger
+logging.basicConfig(
+    filename="telegram_log.txt",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-app = Client(
-    "my_bot",
-    api_id=TELEGRAM_API_ID,
-    api_hash=TELEGRAM_API_HASH,
-    bot_token=TELEGRAM_BOT_TOKEN
-)
+# Simulate the same function interface as your real Telegram functions
 
 async def forward_to_bot(image_data, metadata):
-    async with app:
-        await app.send_document(
-            chat_id=FORWARD_TO_BOT_USERNAME,
-            document=image_data,
-            file_name=f"{metadata['receipt_id']}.jpg",
-            caption=json.dumps(metadata)
-        )
+    """
+    Simulates sending image + metadata to Telegram by logging the event.
+    """
+    log_entry = {
+        "event": "forward_to_bot",
+        "status": "simulated",
+        "image_data_type": str(type(image_data)),
+        "metadata": metadata,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    logging.info(json.dumps(log_entry, ensure_ascii=False, indent=2))
+    print("[LOG] Forwarded image (simulated):", metadata.get("receipt_id"))
+
 
 async def send_admin_notification(message):
-    async with app:
-        await app.send_message(chat_id=ADMIN_CHAT_ID, text=message)
+    """
+    Simulates sending admin notification via Telegram.
+    """
+    log_entry = {
+        "event": "admin_notification",
+        "status": "simulated",
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    logging.info(json.dumps(log_entry, ensure_ascii=False, indent=2))
+    print("[LOG] Admin notification (simulated):", message)
