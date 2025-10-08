@@ -10,7 +10,7 @@ services:
     env_file:
       - .env
     environment:
-      - WAHA_MEDIA_HOST_OVERRIDE=waha:3000          # <--- add this so the app can rewrite URLs to the internal service
+      - WAHA_MEDIA_HOST_OVERRIDE=46.20.111.31:8080          # <--- add this so the app can rewrite URLs to the internal service
     depends_on:
       - waha
 

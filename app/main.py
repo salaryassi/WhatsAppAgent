@@ -46,6 +46,25 @@ from .utils import find_match_in_db
 recent_image_cache = {}  # {(group_id, sender_id): {"url": ..., "timestamp": datetime}}
 CACHE_EXPIRATION_SECONDS = 120
 
+WAHA_MEDIA_HOST_OVERRIDE = os.environ.get("WAHA_MEDIA_HOST_OVERRIDE", "").strip()
+
+def _rewrite_media_url_for_container(url: str) -> str:
+    """Rewrite WAHA 'localhost' URLs to something reachable by this container.
+
+    Priority:
+      1) WAHA_MEDIA_HOST_OVERRIDE env var (e.g. 'waha:3000' or '46.20.111.31:8080')
+      2) replace localhost with host.docker.internal (if available)
+      3) return original url
+    """
+    if not url or ("localhost" not in url and "127.0.0.1" not in url):
+        return url
+
+    if WAHA_MEDIA_HOST_OVERRIDE:
+        # replace host (keep scheme and path)
+        return re.sub(r"(127\.0\.0\.1|localhost)", WAHA_MEDIA_HOST_OVERRIDE, url)
+
+    # best-effort fallback
+    return url.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
 
 # ----------------------
 # Flask app + logger
@@ -255,15 +274,17 @@ def extract_messages_from_payload(payload):
 # ----------------------
 
 def download_media(url):
-    """Download media using configured API key (if present).
+    """Download media using configured API key (if present)."""
+    if not url:
+        raise ValueError("No media URL provided")
 
-    Note: WAHA may report a local URL (e.g. http://localhost:3000/...). In production,
-    ensure that the webhook container can reach that URL or that WAHA exposes a reachable file server.
-    """
+    url_for_request = _rewrite_media_url_for_container(url)
     headers = {"apikey": EVOLUTION_API_KEY} if EVOLUTION_API_KEY else {}
-    response = requests.get(url, headers=headers, timeout=30)
+    log_print(f"Downloading media from {url_for_request} (original: {url})", level="DEBUG")
+    response = requests.get(url_for_request, headers=headers, timeout=30)
     response.raise_for_status()
     return response.content
+
 
 
 def forward_receipt_to_telegram_and_mark(receipt_row):
