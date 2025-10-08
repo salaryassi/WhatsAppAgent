@@ -8,7 +8,7 @@ services:
     volumes:
       - ./app/images:/app/images
       - ./app/uploads:/app/uploads
-      - ./app/receipts.db:/app/receipts.db
+      - ./receipts.db:/app/receipts.db
     env_file:
       - .env
     depends_on:

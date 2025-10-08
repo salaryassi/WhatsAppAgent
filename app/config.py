@@ -14,7 +14,7 @@ FORWARD_TO_BOT_USERNAME = os.getenv("FORWARD_TO_BOT_USERNAME")
 SERVER_UPLOAD_URL = os.getenv("SERVER_UPLOAD_URL")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-DB_PATH = "receipts.db"
+DB_PATH = "./receipts.db"
 MONITORED_GROUPS = ["group1@g.us", "group2@g.us"] # Add your WhatsApp group JIDs
 # config.py (add)
 IMAGES_DIR = os.getenv("IMAGES_DIR", "./app/images")
